@@ -14,7 +14,18 @@ CREATE TABLE IF NOT EXISTS players (
   wins        INT UNSIGNED NOT NULL DEFAULT 0,
   losses      INT UNSIGNED NOT NULL DEFAULT 0,
   draws       INT UNSIGNED NOT NULL DEFAULT 0,
+
+  -- total de partidas
+  games       INT UNSIGNED AS (wins + losses + draws) STORED,
+
+  -- pontuação para ranking
+  score       INT UNSIGNED AS (3 * wins + draws) STORED,
+
   created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                ON UPDATE CURRENT_TIMESTAMP
 );
+
+-- índice para acelerar o ranking
+CREATE INDEX idx_leaderboard 
+ON players (score DESC, games DESC, wins DESC, draws DESC, losses ASC, name ASC);
