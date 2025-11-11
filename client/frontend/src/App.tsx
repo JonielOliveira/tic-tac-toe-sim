@@ -1,7 +1,26 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 
-// --- Types mirrored from backend ---
+// ---------- Helpers de ambiente / URLs ----------
+
+/** Lê VITE_SERVER_URL em build-time; se vier vazia/ausente, retorna "" (same-origin). */
+function resolveServerUrl(): string | "" {
+  // Vite injeta em build-time; usamos any para evitar tipos do Vite aqui
+  const raw = ((import.meta as any)?.env?.VITE_SERVER_URL ?? "") as string;
+  const v = (raw || "").trim();
+  // normaliza: remove barras finais
+  return v ? v.replace(/\/+$/, "") : "";
+}
+
+/** Monta a URL final: se base estiver vazia, devolve path relativo (same-origin). */
+function apiUrl(path: string, base: string | ""): string {
+  const p = path.startsWith("/") ? path : `/${path}`;
+  if (!base) return p; // same-origin
+  return `${base}${p}`;
+}
+
+// ---------- Tipos espelhados do backend ----------
+
 type Mark = "X" | "O";
 type Cell = "" | Mark;
 
@@ -26,18 +45,24 @@ type PlayerStats = {
   score: number;
 };
 
-// --- UI Helpers ---
+// ---------- UI helpers ----------
+
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function useSocket(url: string) {
+// Socket hook que aceita URL explícita ou same-origin (string vazia)
+function useSocket(url: string | "") {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [connected, setConnected] = useState(false);
   const [connError, setConnError] = useState<string | null>(null);
 
   useEffect(() => {
-    const s = io(url, { transports: ["websocket"], autoConnect: true });
+    // Quando url === "" → same-origin (client descobre sozinho)
+    const s = url
+      ? io(url, { transports: ["websocket"], autoConnect: true })
+      : io({ transports: ["websocket"], autoConnect: true });
+
     setSocket(s);
 
     const onConnect = () => {
@@ -52,43 +77,42 @@ function useSocket(url: string) {
     s.on("disconnect", onDisconnect);
     s.on("connect_error", onConnectError);
 
-    return () => {
+    // cleanup deve retornar void
+    return (): void => {
       s.off("connect", onConnect);
       s.off("disconnect", onDisconnect);
       s.off("connect_error", onConnectError);
-      s.close();
+      void s.close();
     };
   }, [url]);
 
   return { socket, connected, connError } as const;
 }
 
-// --- Main App ---
+// ---------- App ----------
+
 export default function App() {
-  // Server URL: default to same origin
-  const [serverUrl, setServerUrl] = useState<string>(() => {
-    try {
-      return (import.meta as any).env?.VITE_SERVER_URL || window.location.origin;
-    } catch {
-      return window.location.origin;
-    }
-  });
+  // Server URL: lê VITE_SERVER_URL; se vazia/ausente → same-origin ("")
+  const [serverUrl] = useState<string | "">(() => resolveServerUrl());
   const { socket, connected, connError } = useSocket(serverUrl);
 
-  // Instance identification (para validar balanceamento)
+  // Identificação da instância (para validar balanceamento)
   const [instanceId, setInstanceId] = useState<string>("-");
-  const [instanceMeta, setInstanceMeta] = useState<{ startedAt?: string; hostname?: string } | null>(null);
+  const [, setInstanceMeta] =
+    useState<{ startedAt?: string; hostname?: string } | null>(null);
+
+  console.log("VITE_SERVER_URL", import.meta.env.VITE_SERVER_URL);
 
   async function fetchInstance() {
     try {
-      const r = await fetch(`${serverUrl}/instance`);
+      const r = await fetch(apiUrl("/api/instance", serverUrl));
       if (!r.ok) throw new Error(await r.text());
       const d = await r.json();
       setInstanceId(d.instanceId || "-");
       setInstanceMeta({ startedAt: d.startedAt, hostname: d.hostname });
     } catch (e) {
       // silencioso; socket também envia o id
-      console.warn("Falha ao buscar /instance", e);
+      console.warn("Falha ao buscar instance", e);
     }
   }
 
@@ -99,16 +123,22 @@ export default function App() {
 
   useEffect(() => {
     if (!socket) return;
+
     const onInstance = (p: any) => {
       if (p?.instanceId) setInstanceId(p.instanceId);
     };
+
     socket.on("instance", onInstance);
-    return () => socket.off("instance", onInstance);
+
+    return (): void => {
+      socket.off("instance", onInstance);
+    };
   }, [socket]);
 
   // Session
   const [name, setName] = useState("");
-  const [phase, setPhase] = useState<"idle" | "waiting" | "playing" | "gameover">("idle");
+  const [phase, setPhase] =
+    useState<"idle" | "waiting" | "playing" | "gameover">("idle");
 
   // Game state
   const [youAre, setYouAre] = useState<Mark | null>(null);
@@ -142,7 +172,7 @@ export default function App() {
   // Fetch leaderboard helper
   const fetchLeaderboard = async () => {
     try {
-      const r = await fetch(`${serverUrl}/leaderboard`);
+      const r = await fetch(apiUrl("/api/leaderboard", serverUrl));
       if (!r.ok) throw new Error(await r.text());
       const data = (await r.json()) as PlayerStats[];
       setLeaderboard(data);
@@ -216,7 +246,7 @@ export default function App() {
     socket.on("error", onCustomError); // server emits custom 'error'
     socket.on("profile", onProfile);
 
-    return () => {
+    return (): void => {
       socket.off("waiting", onWaiting);
       socket.off("matchStarted", onMatchStarted);
       socket.off("state", onState);
@@ -237,7 +267,7 @@ export default function App() {
   };
 
   const playAgain = () => {
-    // Reset and rejoin queue with same name
+    // Reset and rejoin queue com o mesmo nome
     setBoard(Array<Cell>(9).fill(""));
     setResult(null);
     setPhase("idle");
@@ -262,16 +292,28 @@ export default function App() {
       );
 
     if (phase === "playing") {
-      const yourTurnBadge = yourTurn ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-700";
+      const yourTurnBadge = yourTurn
+        ? "bg-emerald-100 text-emerald-800"
+        : "bg-slate-100 text-slate-700";
       return (
-        <div className={classNames("inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm", yourTurnBadge)}>
+        <div
+          className={classNames(
+            "inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm",
+            yourTurnBadge
+          )}
+        >
           {yourTurn ? "Sua vez" : `Vez de ${turn}`}
         </div>
       );
     }
 
     if (phase === "gameover") {
-      const text = result === "draw" ? "Empate" : result === youAre ? "Você venceu!" : "Você perdeu";
+      const text =
+        result === "draw"
+          ? "Empate!"
+          : result === youAre
+          ? "Você venceu!"
+          : "Você perdeu!";
       const style =
         result === "draw"
           ? "bg-slate-100 text-slate-700"
@@ -279,7 +321,12 @@ export default function App() {
           ? "bg-emerald-100 text-emerald-800"
           : "bg-rose-100 text-rose-800";
       return (
-        <div className={classNames("inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm", style)}>
+        <div
+          className={classNames(
+            "inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm",
+            style
+          )}
+        >
           {text}
         </div>
       );
@@ -288,50 +335,63 @@ export default function App() {
     return null;
   };
 
+  // Para exibir algo útil quando same-origin
+  const displayServer = serverUrl ? `(${serverUrl})` : "(load balance)";
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 text-slate-800">
       {/* Top Bar */}
       <header className="sticky top-0 z-10 backdrop-blur supports-[backdrop-filter]:bg-white/60 bg-white/80 border-b border-slate-200">
         <div className="mx-auto max-w-5xl px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-2xl bg-slate-900 text-white grid place-items-center font-bold">XO</div>
-            <h1 className="text-lg font-semibold tracking-tight">Tic-Tac-Toe • Socket.IO</h1>
+            <div className="h-8 w-8 rounded-2xl bg-slate-900 text-white grid place-items-center font-bold">
+              #
+            </div>
+            <h1 className="text-lg font-semibold tracking-tight">Jogo da Velha</h1>
             {/* Chip de Instância */}
-            <span className="ml-2 rounded-lg bg-slate-100 text-slate-700 px-2 py-0.5 text-xs">
-              inst: <span className="font-mono font-semibold">{instanceId}</span>
+            <span className="ml-2 rounded-lg bg-slate-100 text-slate-700 px-2 py-0.5 text-sm">
+              Servidor da Partida:{" "}
+              <span className="font-mono font-semibold">{instanceId}</span>
             </span>
           </div>
           <div className="hidden md:flex items-center gap-2 text-xs">
-            <span className={classNames("inline-block h-2 w-2 rounded-full", connected ? "bg-emerald-500" : "bg-rose-500")}></span>
+            <span
+              className={classNames(
+                "inline-block h-2 w-2 rounded-full",
+                connected ? "bg-emerald-500" : "bg-rose-500"
+              )}
+            ></span>
             {connected ? "Conectado" : "Desconectado"}
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-4 py-8 grid lg:grid-cols-3 gap-6">
-        {/* Left: Controls */}
+      <main className="mx-auto max-w-7xl px-6 py-8 grid lg:grid-cols-3 gap-6">
+        {/* Left: Controls (apenas o card principal) */}
         <section className="lg:col-span-1">
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-5">
-            <h2 className="text-base font-semibold mb-3">Conexão</h2>
-            <label className="block text-xs text-slate-500 mb-1">URL do servidor</label>
+            <h2 className="textbase font-semibold mb-3">Conexão</h2>
+            <label className="block text-xs text-slate-500 mb-1">Ponto de entrada:</label>
             <input
-              value={serverUrl}
+              value={displayServer}
               readOnly
               disabled
               className="w-full rounded-xl border-slate-200 bg-slate-50 text-slate-600 text-sm cursor-default select-text"
-              title="URL do servidor"
+              title="URL do servidor (vazio = mesma origem)"
             />
-            {connError && <p className="mt-2 text-xs text-rose-600">{connError}</p>}
+            {connError && (
+              <p className="mt-2 text-xs text-rose-600">{connError}</p>
+            )}
 
             <div className="h-px bg-slate-200 my-4" />
 
             <h2 className="text-base font-semibold mb-2">Entrar na fila</h2>
-            <label className="block text-xs text-slate-500 mb-1">Seu nome</label>
+            <label className="block text-xs text-slate-500 mb-1">Seu nome:</label>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="w-full rounded-xl border-slate-300 focus:border-slate-400 focus:ring-slate-300 text-sm"
-              placeholder="Alice, Bob…"
+              placeholder="..."
             />
 
             <button
@@ -339,7 +399,9 @@ export default function App() {
               disabled={!canJoin}
               className={classNames(
                 "mt-3 w-full rounded-xl px-4 py-2 text-sm font-medium shadow-sm transition",
-                canJoin ? "bg-slate-900 text-white hover:bg-slate-800" : "bg-slate-200 text-slate-500 cursor-not-allowed"
+                canJoin
+                  ? "bg-slate-900 text-white hover:bg-slate-800"
+                  : "bg-slate-200 text-slate-500 cursor-not-allowed"
               )}
             >
               {phase === "idle" ? "Entrar e procurar partida" : "Aguardando…"}
@@ -361,118 +423,154 @@ export default function App() {
             {/* Player Stats */}
             {profile?.stats && (
               <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <h3 className="text-sm font-semibold mb-2">Seus resultados</h3>
-                <dl className="grid grid-cols-2 gap-y-1 text-sm text-slate-700">
-                  <div className="flex justify-between"><dt>Vitórias</dt><dd className="font-mono">{profile.stats.wins}</dd></div>
-                  <div className="flex justify-between"><dt>Derrotas</dt><dd className="font-mono">{profile.stats.losses}</dd></div>
-                  <div className="flex justify-between"><dt>Empates</dt><dd className="font-mono">{profile.stats.draws}</dd></div>
-                  <div className="flex justify-between"><dt>Total</dt><dd className="font-mono">{profile.stats.games}</dd></div>
-                  <div className="col-span-2 flex justify-between pt-1 border-t border-slate-200 mt-1">
-                    <dt>Pontuação</dt><dd className="font-mono">{profile.stats.score} pts</dd>
+                <h3 className="text-sm font-semibold mb-2">Seus resultados:</h3>
+                <dl className="text-sm text-slate-700 space-y-1">
+                  <div className="flex justify-between space-x-3">
+                    <dt>Vitórias</dt>
+                    <dd className="font-mono">{profile.stats.wins}</dd>
+                  </div>
+                  <div className="flex justify-between space-x-3">
+                    <dt>Derrotas</dt>
+                    <dd className="font-mono">{profile.stats.losses}</dd>
+                  </div>
+                  <div className="flex justify-between space-x-3">
+                    <dt>Empates</dt>
+                    <dd className="font-mono">{profile.stats.draws}</dd>
+                  </div>
+                  <div className="flex justify-between space-x-3">
+                    <dt>Total de Partidas</dt>
+                    <dd className="font-mono">{profile.stats.games}</dd>
+                  </div>
+                  <div className="flex justify-between pt-1 border-t border-slate-200 mt-1">
+                    <dt>Pontuação</dt>
+                    <dd className="font-mono">{profile.stats.score} pts</dd>
                   </div>
                 </dl>
               </div>
             )}
           </div>
-
-          {/* Leaderboard */}
-          {leaderboard.length > 0 && (
-            <div className="mt-6 bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-5">
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-sm font-semibold">🏆 Ranking</h3>
-                <button
-                  onClick={fetchLeaderboard}
-                  className="text-xs text-slate-600 hover:text-slate-900 underline underline-offset-2"
-                >
-                  atualizar
-                </button>
-              </div>
-              <ol className="text-sm space-y-1 text-slate-700">
-                {leaderboard.map((p, i) => (
-                  <li key={p.name} className="flex items-center justify-between">
-                    <span className="truncate">
-                      <span className="text-slate-400 mr-2 tabular-nums w-5 inline-block text-right">{i + 1}.</span>
-                      {p.name}
-                    </span>
-                    <span className="font-mono">{p.score} pts</span>
-                  </li>
-                ))}
-              </ol>
-            </div>
-          )}
-
-          {/* Info Card */}
-          <div className="mt-6 bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-5">
-            <h3 className="text-sm font-semibold mb-2">Regras rápidas</h3>
-            <ul className="text-sm list-disc pl-5 space-y-1 text-slate-600">
-              <li>Jogo 1×1. A fila pareia automaticamente assim que houver outro jogador.</li>
-              <li>Você joga somente quando for a sua vez.</li>
-              <li>Partidas encerram ao vencer, empatar ou desconectar.</li>
-            </ul>
-          </div>
         </section>
 
-        {/* Right: Game Board */}
+        {/* Right: Game Board + Sidebar à direita */}
         <section className="lg:col-span-2">
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-6">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="rounded-xl bg-slate-100 px-3 py-1 text-sm">Partida: {gameId || "—"}</div>
-                <div className="rounded-xl bg-slate-100 px-3 py-1 text-sm">Você: {youAre ?? "—"}</div>
-                <div className="rounded-xl bg-slate-100 px-3 py-1 text-sm">Oponente: {opponent || "—"}</div>
+          {/* grid interno: tabuleiro | sidebar */}
+          <div className="grid gap-6 lg:grid-cols-[1fr_300px]">
+            {/* Coluna 1 — Tabuleiro */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-6">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3 mx-auto">
+                  <div className="rounded-xl bg-slate-100 px-3 py-1 text-sm">
+                    <span className="font-semibold">Partida:</span>{" "}
+                    {gameId ? `[ ${gameId} ]` : "—"}
+                  </div>
+                  <div className="rounded-xl bg-slate-100 px-3 py-1 text-sm">
+                    <span className="font-semibold">Você:</span> {youAre ?? "—"}
+                  </div>
+                  <div className="rounded-xl bg-slate-100 px-3 py-1 text-sm">
+                    <span className="font-semibold">Oponente:</span>{" "}
+                    {opponent || "—"}
+                  </div>
+                </div>
+                {/* <StatusBadge /> */}
               </div>
-              <StatusBadge />
-            </div>
 
-            {/* Board */}
-            <div className="mt-6 grid grid-cols-3 gap-3 sm:gap-4 max-w-md">
-              {board.map((cell, idx) => {
-                const clickable = phase === "playing" && yourTurn && cell === "";
-                return (
-                  <button
-                    key={idx}
-                    onClick={() => makeMove(idx)}
-                    disabled={!clickable}
-                    className={classNames(
-                      "aspect-square rounded-2xl border grid place-items-center text-4xl sm:text-5xl font-black tracking-widest",
-                      clickable
-                        ? "bg-white border-slate-300 hover:bg-slate-50 hover:border-slate-400"
-                        : "bg-slate-50 border-slate-200"
-                    )}
-                    aria-label={`casa ${idx + 1}`}
-                  >
-                    <span
+              {/* Board */}
+              <div className="mt-6 grid grid-cols-3 gap-3 sm:gap-4 max-w-md mx-auto">
+                {board.map((cell, idx) => {
+                  const clickable =
+                    phase === "playing" && yourTurn && cell === "";
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => makeMove(idx)}
+                      disabled={!clickable}
                       className={classNames(
-                        cell === "X" && "text-slate-900",
-                        cell === "O" && "text-emerald-600"
+                        "aspect-square rounded-2xl border grid place-items-center text-4xl sm:text-5xl font-black tracking-widest",
+                        clickable
+                          ? "bg-white border-slate-300 hover:bg-slate-50 hover:border-slate-400"
+                          : "bg-slate-50 border-slate-200"
                       )}
+                      aria-label={`casa ${idx + 1}`}
                     >
-                      {cell}
-                    </span>
-                  </button>
-                );
-              })}
+                      <span
+                        className={classNames(
+                          cell === "X" && "text-sky-500",
+                          cell === "O" && "text-rose-500"
+                        )}
+                      >
+                        {cell}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Turn / Legend */}
+              <div className="mt-6 flex flex-wrap items-center gap-3 text-sm text-slate-600">
+                <div className="flex items-center gap-2">
+                  <span className="h-3 w-3 rounded-full bg-sky-500 inline-block" /> X
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="h-3 w-3 rounded-full bg-rose-500 inline-block" /> O
+                </div>
+                {phase === "playing" && (
+                  <div className="ml-auto text-slate-700">
+                    {yourTurn ? "Faça sua jogada" : `Aguardando ${turn}`}
+                  </div>
+                )}
+                {phase === "gameover" && (
+                  <div className="ml-auto text-slate-700">
+                    {result === "draw"
+                      ? "Empate."
+                      : result === youAre
+                      ? "Parabéns, você venceu!"
+                      : "Você perdeu, tente novamente."}
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Turn / Legend */}
-            <div className="mt-6 flex flex-wrap items-center gap-3 text-sm text-slate-600">
-              <div className="flex items-center gap-2">
-                <span className="h-3 w-3 rounded-full bg-slate-900 inline-block" /> X
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="h-3 w-3 rounded-full bg-emerald-600 inline-block" /> O
-              </div>
-              {phase === "playing" && (
-                <div className="ml-auto text-slate-700">
-                  {yourTurn ? "Faça sua jogada" : `Aguardando ${turn}`}
+            {/* Coluna 2 — Sidebar: Ranking + Regras rápidas */}
+            <aside className="space-y-6">
+              {leaderboard.length > 0 && (
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-5">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-sm font-semibold">🏆 Ranking</h3>
+                    <button
+                      onClick={fetchLeaderboard}
+                      className="text-xs text-slate-600 hover:text-slate-900 underline underline-offset-2"
+                    >
+                      atualizar
+                    </button>
+                  </div>
+                  <ol className="text-sm space-y-1 text-slate-700">
+                    {leaderboard.map((p, i) => (
+                      <li key={p.name} className="flex items-center justify-between">
+                        <span className="truncate">
+                          <span className="text-slate-400 mr-2 tabular-nums w-5 inline-block text-right">
+                            {i + 1}.
+                          </span>
+                          {p.name}
+                        </span>
+                        <span className="font-mono">{p.score} pts</span>
+                      </li>
+                    ))}
+                  </ol>
                 </div>
               )}
-              {phase === "gameover" && (
-                <div className="ml-auto text-slate-700">
-                  {result === "draw" ? "Empate." : result === youAre ? "Vitória sua!" : "Derrota."}
-                </div>
-              )}
-            </div>
+
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-5">
+                <h3 className="text-sm font-semibold mb-2">Regras rápidas</h3>
+                <ul className="text-sm list-disc pl-5 space-y-1 text-slate-600">
+                  <li>
+                    Jogo 1×1. A fila pareia automaticamente assim que houver outro
+                    jogador no mesmo servidor.
+                  </li>
+                  <li>Você joga somente quando for a sua vez.</li>
+                  <li>Partidas encerram ao vencer, empatar ou desconectar.</li>
+                </ul>
+              </div>
+            </aside>
           </div>
         </section>
       </main>
@@ -480,13 +578,15 @@ export default function App() {
       {/* Toast */}
       {toast && (
         <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50">
-          <div className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm shadow-lg">{toast}</div>
+          <div className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm shadow-lg">
+            {toast}
+          </div>
         </div>
       )}
 
       {/* Footer */}
       <footer className="py-8 text-center text-xs text-slate-500">
-        Feito com <span className="font-semibold">Tailwind</span> + <span className="font-semibold">Socket.IO</span>
+        Desenvolvido por <span className="font-semibold">Joniel R. de Oliveira</span>
       </footer>
     </div>
   );
