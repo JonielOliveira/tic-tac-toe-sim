@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import cors from 'cors';
 import crypto from 'crypto';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -18,7 +19,7 @@ function genInstanceId(len = 4) {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const bytes = crypto.randomBytes(len);
   let out = '';
-  for (let i = 0; i < len; i++) out += alphabet[bytes[i] % alphabet.length];
+  for (let i = 0; i < len; i++) out += alphabet[bytes[i]! % alphabet.length];
   return out;
 }
 
@@ -45,15 +46,31 @@ type Game = {
   finished: boolean;
 };
 
+// -------------------------------------
+// REST endpoints
+// -------------------------------------
 const app = express();
 app.use(express.json());
+app.use(cors());
 
-// ------------------------
-// REST endpoints
-// ------------------------
+// -------------------------------------
+// Router montado em /api
+// -------------------------------------
+const router = express.Router();
+
+// Healthcheck
+router.get('/health', (_req, res): void => {
+  res.status(200).json({
+    status: 'ok',
+    instanceId: INSTANCE_ID,
+    uptime: process.uptime(), // segundos desde o boot
+    startedAt: STARTED_AT,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // Info da instância
-app.get('/instance', (_req, res): void => {
+router.get('/instance', (_req, res): void => {
   res.json({
     instanceId: INSTANCE_ID,
     startedAt: STARTED_AT,
@@ -63,7 +80,7 @@ app.get('/instance', (_req, res): void => {
 });
 
 // Leaderboard TOP 10
-app.get('/leaderboard', async (_req, res) => {
+router.get('/leaderboard', async (_req, res) => {
   try {
     const top = await getLeaderboard();
     res.json(top);
@@ -73,7 +90,7 @@ app.get('/leaderboard', async (_req, res) => {
 });
 
 // Consultar stats de um jogador (não cria)
-app.get('/players/:name', async (req, res): Promise<void> => {
+router.get('/players/:name', async (req, res): Promise<void> => {
   try {
     const name = String(req.params.name || '');
     const stats = await getPlayerStats(name);
@@ -86,8 +103,14 @@ app.get('/players/:name', async (req, res): Promise<void> => {
   }
 });
 
-// ------------------------
+// Monta tudo sob /api
+app.use('/api', router);
 
+// -------------------------------------
+
+// -------------------------------------
+// Socket.IO (path padrão /socket.io/)
+// -------------------------------------
 const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: '*' } });
 
@@ -262,5 +285,9 @@ io.on('connection', (socket) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => console.log(`Server on :${PORT}`));
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '0.0.0.0';
+
+httpServer.listen(PORT, HOST, () =>
+  console.log(`Server on ${HOST}:${PORT}`)
+);
