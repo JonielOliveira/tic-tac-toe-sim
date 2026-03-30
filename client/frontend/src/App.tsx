@@ -3,13 +3,22 @@ import { io, Socket } from "socket.io-client";
 
 // ---------- Helpers de ambiente / URLs ----------
 
-/** Lê VITE_SERVER_URL em build-time; se vier vazia/ausente, retorna "" (same-origin). */
-function resolveServerUrl(): string | "" {
-  // Vite injeta em build-time; usamos any para evitar tipos do Vite aqui
-  const raw = ((import.meta as any)?.env?.VITE_SERVER_URL ?? "") as string;
+/** Normaliza URL vinda de env: remove espaços e barras finais. */
+function normalizeBaseUrl(raw: string): string | "" {
   const v = (raw || "").trim();
-  // normaliza: remove barras finais
   return v ? v.replace(/\/+$/, "") : "";
+}
+
+/** Resolve bases de API/Socket com fallback para VITE_SERVER_URL e same-origin. */
+function resolveBackendUrls() {
+  // Vite injeta em build-time; usamos any para evitar tipos do Vite aqui
+  const env = ((import.meta as any)?.env ?? {}) as Record<string, string | undefined>;
+
+  const legacy = normalizeBaseUrl(env.VITE_SERVER_URL ?? "");
+  const api = normalizeBaseUrl(env.VITE_API_URL ?? "") || legacy;
+  const socket = normalizeBaseUrl(env.VITE_SOCKET_URL ?? "") || legacy;
+
+  return { api, socket } as const;
 }
 
 /** Monta a URL final: se base estiver vazia, devolve path relativo (same-origin). */
@@ -92,20 +101,25 @@ function useSocket(url: string | "") {
 // ---------- App ----------
 
 export default function App() {
-  // Server URL: lê VITE_SERVER_URL; se vazia/ausente → same-origin ("")
-  const [serverUrl] = useState<string | "">(() => resolveServerUrl());
-  const { socket, connected, connError } = useSocket(serverUrl);
+  // URLs: VITE_API_URL e VITE_SOCKET_URL; fallback em VITE_SERVER_URL; vazio => same-origin
+  const [{ apiUrlBase, socketUrlBase }] = useState(() => {
+    const urls = resolveBackendUrls();
+    return { apiUrlBase: urls.api, socketUrlBase: urls.socket };
+  });
+  const { socket, connected, connError } = useSocket(socketUrlBase);
 
   // Identificação da instância (para validar balanceamento)
   const [instanceId, setInstanceId] = useState<string>("-");
   const [, setInstanceMeta] =
     useState<{ startedAt?: string; hostname?: string } | null>(null);
 
+  console.log("VITE_API_URL", import.meta.env.VITE_API_URL);
+  console.log("VITE_SOCKET_URL", import.meta.env.VITE_SOCKET_URL);
   console.log("VITE_SERVER_URL", import.meta.env.VITE_SERVER_URL);
 
   async function fetchInstance() {
     try {
-      const r = await fetch(apiUrl("/api/instance", serverUrl));
+      const r = await fetch(apiUrl("/api/instance", apiUrlBase));
       if (!r.ok) throw new Error(await r.text());
       const d = await r.json();
       setInstanceId(d.instanceId || "-");
@@ -119,7 +133,7 @@ export default function App() {
   useEffect(() => {
     fetchInstance();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverUrl]);
+  }, [apiUrlBase]);
 
   useEffect(() => {
     if (!socket) return;
@@ -172,7 +186,7 @@ export default function App() {
   // Fetch leaderboard helper
   const fetchLeaderboard = async () => {
     try {
-      const r = await fetch(apiUrl("/api/leaderboard", serverUrl));
+      const r = await fetch(apiUrl("/api/leaderboard", apiUrlBase));
       if (!r.ok) throw new Error(await r.text());
       const data = (await r.json()) as PlayerStats[];
       setLeaderboard(data);
@@ -185,7 +199,7 @@ export default function App() {
   useEffect(() => {
     fetchLeaderboard();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverUrl]);
+  }, [apiUrlBase]);
 
   // Recarrega leaderboard ao terminar partidas
   useEffect(() => {
@@ -336,7 +350,8 @@ export default function App() {
   };
 
   // Para exibir algo útil quando same-origin
-  const displayServer = serverUrl ? `(${serverUrl})` : "(load balance)";
+  const displayApi = apiUrlBase ? `(${apiUrlBase})` : "(same-origin)";
+  const displaySocket = socketUrlBase ? `(${socketUrlBase})` : "(same-origin)";
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 text-slate-800">
@@ -371,13 +386,21 @@ export default function App() {
         <section className="lg:col-span-1">
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-5">
             <h2 className="textbase font-semibold mb-3">Conexão</h2>
-            <label className="block text-xs text-slate-500 mb-1">Ponto de entrada:</label>
+            <label className="block text-xs text-slate-500 mb-1">API base:</label>
             <input
-              value={displayServer}
+              value={displayApi}
               readOnly
               disabled
               className="w-full rounded-xl border-slate-200 bg-slate-50 text-slate-600 text-sm cursor-default select-text"
-              title="URL do servidor (vazio = mesma origem)"
+              title="URL base da API (vazio = mesma origem)"
+            />
+            <label className="block text-xs text-slate-500 mb-1 mt-3">Socket base:</label>
+            <input
+              value={displaySocket}
+              readOnly
+              disabled
+              className="w-full rounded-xl border-slate-200 bg-slate-50 text-slate-600 text-sm cursor-default select-text"
+              title="URL base do Socket.IO (vazio = mesma origem)"
             />
             {connError && (
               <p className="mt-2 text-xs text-rose-600">{connError}</p>
